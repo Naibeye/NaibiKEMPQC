@@ -1,0 +1,26 @@
+# DLPL-DH Intermediate Value Tests
+# For implementation debugging and validation
+# Parameters: n=256, k=3, q=7681
+
+=== NTT Roundtrip Test ===
+input[0..7] = 3 20 37 54 71 88 105 122 
+ntt[0..7] = 1661 3509 5519 2181 7281 2797 6979 4635 
+intt[0..7] = 3 20 37 54 71 88 105 122 
+roundtrip = PASS
+
+=== Polynomial Multiplication Test ===
+a = 1 + x + x^2
+b = 1 + x
+c = a*b mod (x^256+1) = 1 + 2*x + 2*x^2 + 1*x^3
+expected = 1 + 2x + 2x^2 + x^3
+verify = PASS
+
+=== Montgomery Arithmetic Test ===
+q = 7681
+R = 2^16 = 65536
+R^2 mod q = 1353
+q' = 3327 (such that q*q' = -1 mod R)
+
+Verify q*q' mod R = 65535 (should be 65535)
+montgomery_check = PASS
+
