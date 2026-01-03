@@ -291,16 +291,17 @@ int bc_inverse(bc_matrix_t *r, const bc_matrix_t *a) {
 #elif DLPL_K == 4
     /*
      * For k=4: Block-circulant M = circ(a0, a1, a2, a3)
-     * Use factorization: det = det(A+C) * det(A-C) where
-     * A = a0 + a2, C = a1 + a3, B = a0 - a2, D = a1 - a3
-     * det = ((A+B)(A-B) - (C+D)(C-D)) for Cayley-like approach
+     * Use DFT decomposition: eigenvalues are
+     * λ_j = a0 + ω^j*a1 + ω^(2j)*a2 + ω^(3j)*a3, j=0,1,2,3
+     * where ω = i (primitive 4th root of unity, ω^2 = -1)
      * 
-     * Simpler approach using eigenvalue decomposition:
-     * In Fourier domain with 4th root of unity omega (omega^4=1, omega^2=-1):
-     * lambda_j = a0 + omega^j*a1 + omega^(2j)*a2 + omega^(3j)*a3
-     * det(M) = prod_j lambda_j
+     * λ_0 = a0 + a1 + a2 + a3
+     * λ_1 = a0 + i*a1 - a2 - i*a3 = (a0-a2) + i*(a1-a3)
+     * λ_2 = a0 - a1 + a2 - a3
+     * λ_3 = a0 - i*a1 - a2 + i*a3 = (a0-a2) - i*(a1-a3) = conj(λ_1)
      * 
-     * For R[x]/(x^n+1) with NTT-friendly q, we compute pointwise.
+     * det(M) = λ_0 * λ_1 * λ_2 * λ_3 = λ_0 * λ_2 * |λ_1|²
+     * |λ_1|² = (a0-a2)² + (a1-a3)²
      */
     poly_t a0, a1, a2, a3;
     poly_copy(&a0, &a->row[0]);
@@ -308,91 +309,97 @@ int bc_inverse(bc_matrix_t *r, const bc_matrix_t *a) {
     poly_copy(&a2, &a->row[2]);
     poly_copy(&a3, &a->row[3]);
     
-    /* Compute sums for 2x2 block decomposition:
-     * M = [[A, B], [B, A]] where A=circ(a0,a2), B=circ(a1,a3)
-     * det(M) = det(A+B)*det(A-B)
-     * A+B row = [a0+a1, a2+a3], A-B row = [a0-a1, a2-a3]
-     */
-    poly_t sum02, sum13, diff02, diff13;
-    poly_add(&sum02, &a0, &a2);
-    poly_add(&sum13, &a1, &a3);
+    /* Compute eigenvalues (real parts for λ_0, λ_2) */
+    poly_t lam0, lam2;  /* λ_0 = a0+a1+a2+a3, λ_2 = a0-a1+a2-a3 */
+    poly_t sum01, sum23, diff01, diff23;
+    poly_add(&sum01, &a0, &a1);
+    poly_add(&sum23, &a2, &a3);
+    poly_sub(&diff01, &a0, &a1);
+    poly_sub(&diff23, &a2, &a3);
+    poly_add(&lam0, &sum01, &sum23);      /* λ_0 = (a0+a1) + (a2+a3) */
+    poly_add(&lam2, &diff01, &diff23);    /* λ_2 = (a0-a1) + (a2-a3) */
+    
+    /* For λ_1 = (a0-a2) + i*(a1-a3): |λ_1|² = (a0-a2)² + (a1-a3)² */
+    poly_t diff02, diff13;
     poly_sub(&diff02, &a0, &a2);
     poly_sub(&diff13, &a1, &a3);
+    poly_t diff02_sq, diff13_sq, lam1_norm;
+    poly_mul_ntt(&diff02_sq, &diff02, &diff02);
+    poly_mul_ntt(&diff13_sq, &diff13, &diff13);
+    poly_add(&lam1_norm, &diff02_sq, &diff13_sq);  /* |λ_1|² */
     
-    /* det1 = det(A+B) = (sum02+sum13)*(sum02-sum13) for k=2 circulant */
-    /* det2 = det(A-B) = (diff02+diff13)*(diff02-diff13) */
-    poly_t apb_sum, apb_diff, det1;
-    poly_add(&apb_sum, &sum02, &sum13);
-    poly_sub(&apb_diff, &sum02, &sum13);
-    poly_mul_ntt(&det1, &apb_sum, &apb_diff);
-    
-    poly_t amb_sum, amb_diff, det2;
-    poly_add(&amb_sum, &diff02, &diff13);
-    poly_sub(&amb_diff, &diff02, &diff13);
-    poly_mul_ntt(&det2, &amb_sum, &amb_diff);
-    
-    /* Total det = det1 * det2 */
-    poly_t det, det_inv;
-    poly_mul_ntt(&det, &det1, &det2);
+    /* det = λ_0 * λ_2 * |λ_1|² */
+    poly_t lam02, det, det_inv;
+    poly_mul_ntt(&lam02, &lam0, &lam2);
+    poly_mul_ntt(&det, &lam02, &lam1_norm);
     
     if (!poly_inverse(&det_inv, &det)) {
         return 0;
     }
     
-    /* Compute partial inverses for det1 and det2 */
-    poly_t det1_inv, det2_inv;
-    if (!poly_inverse(&det1_inv, &det1) || !poly_inverse(&det2_inv, &det2)) {
-        return 0;
-    }
+    /* Compute individual eigenvalue inverses */
+    poly_t lam0_inv, lam2_inv, lam1_norm_inv;
+    if (!poly_inverse(&lam0_inv, &lam0)) return 0;
+    if (!poly_inverse(&lam2_inv, &lam2)) return 0;
+    if (!poly_inverse(&lam1_norm_inv, &lam1_norm)) return 0;
     
-    /* Inverse of k=2 circulant: inv(circ(x,y)) = circ(x/(x²-y²), -y/(x²-y²))
-     * (A+B)^-1 = circ(sum02*det1_inv, -sum13*det1_inv)
-     * (A-B)^-1 = circ(diff02*det2_inv, -diff13*det2_inv)
+    /* λ_1^(-1) = conj(λ_1) / |λ_1|² = ((a0-a2) - i*(a1-a3)) / |λ_1|²
+     * Re(λ_1^(-1)) = (a0-a2) / |λ_1|²
+     * Im(λ_1^(-1)) = -(a1-a3) / |λ_1|²
      */
-    poly_t inv_apb0, inv_apb1, inv_amb0, inv_amb1;
-    poly_t neg_sum13, neg_diff13;
-    
-    poly_mul_ntt(&inv_apb0, &sum02, &det1_inv);
-    poly_neg(&neg_sum13, &sum13);
-    poly_mul_ntt(&inv_apb1, &neg_sum13, &det1_inv);
-    
-    poly_mul_ntt(&inv_amb0, &diff02, &det2_inv);
+    poly_t lam1_inv_re, lam1_inv_im, neg_diff13;
+    poly_mul_ntt(&lam1_inv_re, &diff02, &lam1_norm_inv);
     poly_neg(&neg_diff13, &diff13);
-    poly_mul_ntt(&inv_amb1, &neg_diff13, &det2_inv);
+    poly_mul_ntt(&lam1_inv_im, &neg_diff13, &lam1_norm_inv);
     
-    /* Reconstruct M^-1: 
-     * M^-1 = 0.5 * [[(A+B)^-1 + (A-B)^-1, (A+B)^-1 - (A-B)^-1],
-     *               [(A+B)^-1 - (A-B)^-1, (A+B)^-1 + (A-B)^-1]]
-     * But we want first row of block-circulant result.
-     * r[0] = 0.5*(inv_apb0 + inv_amb0)
-     * r[1] = 0.5*(inv_apb1 + inv_amb1) 
-     * r[2] = 0.5*(inv_apb0 - inv_amb0)
-     * r[3] = 0.5*(inv_apb1 - inv_amb1)
+    /* Inverse DFT to get M^(-1) row:
+     * M^(-1)[0,j] = (1/4) * Σ_k ω^(-jk) * λ_k^(-1)
+     * 
+     * r0 = (1/4)(λ_0^-1 + λ_1^-1 + λ_2^-1 + λ_3^-1)
+     *    = (1/4)(λ_0^-1 + λ_2^-1 + 2*Re(λ_1^-1))
+     * r1 = (1/4)(λ_0^-1 - i*λ_1^-1 - λ_2^-1 + i*λ_3^-1)
+     *    = (1/4)(λ_0^-1 - λ_2^-1 + 2*Im(λ_1^-1))
+     * r2 = (1/4)(λ_0^-1 - λ_1^-1 + λ_2^-1 - λ_3^-1)
+     *    = (1/4)(λ_0^-1 + λ_2^-1 - 2*Re(λ_1^-1))
+     * r3 = (1/4)(λ_0^-1 + i*λ_1^-1 - λ_2^-1 - i*λ_3^-1)
+     *    = (1/4)(λ_0^-1 - λ_2^-1 - 2*Im(λ_1^-1))
      */
-    poly_t half_sum0, half_sum1, half_diff0, half_diff1;
-    poly_add(&half_sum0, &inv_apb0, &inv_amb0);
-    poly_add(&half_sum1, &inv_apb1, &inv_amb1);
-    poly_sub(&half_diff0, &inv_apb0, &inv_amb0);
-    poly_sub(&half_diff1, &inv_apb1, &inv_amb1);
+    poly_t sum_lam_inv, diff_lam_inv, two_re, two_im;
+    poly_add(&sum_lam_inv, &lam0_inv, &lam2_inv);
+    poly_sub(&diff_lam_inv, &lam0_inv, &lam2_inv);
+    poly_add(&two_re, &lam1_inv_re, &lam1_inv_re);
+    poly_add(&two_im, &lam1_inv_im, &lam1_inv_im);
     
-    /* Multiply by 2^-1 mod q */
-    int64_t two_inv = 1;
+    poly_t r0_4, r1_4, r2_4, r3_4;
+    poly_add(&r0_4, &sum_lam_inv, &two_re);    /* 4*r0 */
+    poly_add(&r1_4, &diff_lam_inv, &two_im);   /* 4*r1 */
+    poly_sub(&r2_4, &sum_lam_inv, &two_re);    /* 4*r2 */
+    poly_sub(&r3_4, &diff_lam_inv, &two_im);   /* 4*r3 */
+    
+    /* Multiply by 4^-1 mod q */
+    int64_t four_inv;
     {
-        /* Extended Euclidean: 2 * x ≡ 1 (mod q) */
+        /* 4^-1 mod q using Fermat: 4^(q-2) mod q */
         int64_t q = DLPL_Q;
-        two_inv = (q + 1) / 2;  /* Works since q is odd */
+        /* For odd q: 4^-1 = (q+1)/4 if q ≡ 3 (mod 4), else compute */
+        int64_t base = 4, exp = q - 2, result = 1;
+        while (exp > 0) {
+            if (exp & 1) result = (result * base) % q;
+            base = (base * base) % q;
+            exp >>= 1;
+        }
+        four_inv = result;
     }
     
     for (int i = 0; i < DLPL_N; i++) {
-        r->row[0].coeffs[i] = (poly_coeff_t)(((int64_t)half_sum0.coeffs[i] * two_inv) % DLPL_Q);
-        r->row[1].coeffs[i] = (poly_coeff_t)(((int64_t)half_sum1.coeffs[i] * two_inv) % DLPL_Q);
-        r->row[2].coeffs[i] = (poly_coeff_t)(((int64_t)half_diff0.coeffs[i] * two_inv) % DLPL_Q);
-        r->row[3].coeffs[i] = (poly_coeff_t)(((int64_t)half_diff1.coeffs[i] * two_inv) % DLPL_Q);
-        /* Normalize to [0, q) */
-        if (r->row[0].coeffs[i] < 0) r->row[0].coeffs[i] += DLPL_Q;
-        if (r->row[1].coeffs[i] < 0) r->row[1].coeffs[i] += DLPL_Q;
-        if (r->row[2].coeffs[i] < 0) r->row[2].coeffs[i] += DLPL_Q;
-        if (r->row[3].coeffs[i] < 0) r->row[3].coeffs[i] += DLPL_Q;
+        int64_t c0 = ((int64_t)r0_4.coeffs[i] * four_inv) % DLPL_Q;
+        int64_t c1 = ((int64_t)r1_4.coeffs[i] * four_inv) % DLPL_Q;
+        int64_t c2 = ((int64_t)r2_4.coeffs[i] * four_inv) % DLPL_Q;
+        int64_t c3 = ((int64_t)r3_4.coeffs[i] * four_inv) % DLPL_Q;
+        r->row[0].coeffs[i] = (poly_coeff_t)(c0 < 0 ? c0 + DLPL_Q : c0);
+        r->row[1].coeffs[i] = (poly_coeff_t)(c1 < 0 ? c1 + DLPL_Q : c1);
+        r->row[2].coeffs[i] = (poly_coeff_t)(c2 < 0 ? c2 + DLPL_Q : c2);
+        r->row[3].coeffs[i] = (poly_coeff_t)(c3 < 0 ? c3 + DLPL_Q : c3);
     }
     
     return 1;
@@ -534,20 +541,55 @@ void gm_mul_bc(general_matrix_t *r, const general_matrix_t *gm, const bc_matrix_
 }
 
 /* ==========================================================================
- * Serialization
+ * Serialization (Kyber-style bit-packing)
  * ========================================================================== */
 
+/**
+ * @brief Encode polynomial to bytes using bit-packing (Kyber-style)
+ * Each coefficient is packed using DLPL_LOGQ bits
+ * @param out Output buffer (size DLPL_POLY_BYTES)
+ * @param p Input polynomial
+ */
 void poly_to_bytes(uint8_t *out, const poly_t *p) {
-    /* Pack coefficients (assuming DLPL_LOGQ <= 16) */
+    /* Zero-initialize output buffer */
+    for (int i = 0; i < DLPL_POLY_BYTES; i++) {
+        out[i] = 0;
+    }
+    
+    /* Bit-pack coefficients using DLPL_LOGQ bits each */
+    int bit_pos = 0;
     for (int i = 0; i < DLPL_N; i++) {
-        out[2*i] = p->coeffs[i] & 0xFF;
-        out[2*i + 1] = (p->coeffs[i] >> 8) & 0xFF;
+        uint16_t coeff = (uint16_t)(p->coeffs[i] & ((1 << DLPL_LOGQ) - 1));
+        
+        /* Pack each bit of the coefficient */
+        for (int b = 0; b < DLPL_LOGQ; b++) {
+            if (coeff & (1 << b)) {
+                out[bit_pos / 8] |= (1 << (bit_pos % 8));
+            }
+            bit_pos++;
+        }
     }
 }
 
+/**
+ * @brief Decode polynomial from bytes using bit-unpacking (Kyber-style)
+ * @param p Output polynomial
+ * @param in Input buffer (size DLPL_POLY_BYTES)
+ */
 void poly_from_bytes(poly_t *p, const uint8_t *in) {
+    int bit_pos = 0;
     for (int i = 0; i < DLPL_N; i++) {
-        p->coeffs[i] = (poly_coeff_t)in[2*i] | ((poly_coeff_t)in[2*i + 1] << 8);
+        uint16_t coeff = 0;
+        
+        /* Unpack each bit of the coefficient */
+        for (int b = 0; b < DLPL_LOGQ; b++) {
+            if (in[bit_pos / 8] & (1 << (bit_pos % 8))) {
+                coeff |= (1 << b);
+            }
+            bit_pos++;
+        }
+        
+        p->coeffs[i] = (poly_coeff_t)coeff;
         p->coeffs[i] = cond_sub_q(p->coeffs[i]);
     }
 }

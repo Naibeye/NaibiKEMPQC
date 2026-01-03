@@ -30,6 +30,8 @@
  *   Verification: 3329 * 3327 = 11,077,983 ≡ -1 (mod 65536)
  * q = 7681 (NewHope): R² = 5569, q' = 7679
  *   Verification: 7681 * 7679 = 58,979,999 ≡ -1 (mod 65536)
+ * q = 12289 (NewHope-512): R² = 10952, q' = 12287
+ *   Verification: 12289 * 12287 ≡ -1 (mod 65536)
  */
 #if DLPL_Q == 3329
   #define MONT_R2      1353      /* R^2 mod 3329 */
@@ -37,6 +39,9 @@
 #elif DLPL_Q == 7681
   #define MONT_R2      5569      /* R^2 mod 7681 */
   #define MONT_QPRIME  7679      /* q' for q=7681 */
+#elif DLPL_Q == 12289
+  #define MONT_R2      10952     /* R^2 mod 12289 */
+  #define MONT_QPRIME  12287     /* q' for q=12289 */
 #else
   #error "Unsupported DLPL_Q value - add Montgomery constants"
 #endif

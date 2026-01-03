@@ -140,26 +140,28 @@ dlpl_kem_decaps(ss_receiver, &ct, &sk);
 
 ## Security Levels & Parameters
 
-### Current Parameters (C Implementation)
+### Unified Parameters (C and Python)
 
 | Level | n | q | k | η_s | η_e | Security |
 |-------|-----|------|---|-----|-----|----------|
-| **L1** | 128 | 3329 | 2 | 3 | 3 | 128-bit |
-| **L3** | 128 | 3329 | 3 | 2 | 2 | 192-bit |
-| **L5** | 128 | 3329 | 4 | 2 | 2 | 256-bit |
+| **L1** | 256 | 7681 | 2 | 3 | 3 | 128-bit |
+| **L3** | 256 | 7681 | 3 | 2 | 2 | 192-bit |
+| **L5** | 256 | 7681 | 4 | 2 | 2 | 256-bit |
 
 - **n**: Polynomial degree (power of 2)
-- **q**: Prime modulus (q = 3329, Kyber prime, q ≡ 1 mod 256)
+- **q**: Prime modulus (NTT-friendly: q ≡ 1 mod 2n)
 - **k**: Matrix dimension (block-circulant k×k)
 - **η_s, η_e**: CBD (Centered Binomial Distribution) parameters for small elements
 
 ### Key and Ciphertext Sizes
 
-| Level | Public Key | Secret Key | Ciphertext | Shared Secret |
-|-------|------------|------------|------------|---------------|
-| L1 | ~2 KB | ~1 KB | ~1 KB | 32 bytes |
-| L3 | ~4.5 KB | ~2.3 KB | ~2.3 KB | 32 bytes |
-| L5 | ~8 KB | ~4 KB | ~4 KB | 32 bytes |
+| Level | Public Key | Secret Key (KEM) | Ciphertext | Shared Secret |
+|-------|------------|------------------|------------|---------------|
+| L1 | 3,328 bytes | 5,056 bytes | 1,696 bytes | 32 bytes |
+| L3 | 7,488 bytes | 10,048 bytes | 3,776 bytes | 32 bytes |
+| L5 | 13,312 bytes | 16,704 bytes | 6,688 bytes | 32 bytes |
+
+*Note: Uses Kyber-style bit-packing (13 bits/coefficient for q=7681) for compact serialization.*
 
 ## API Reference
 
@@ -524,12 +526,39 @@ where $r$ is a random invertible element.
 
 ## Performance
 
+### C Implementation Benchmarks
+
+**PKE Performance:**
+| Level | n | k | q | KeyGen | Encrypt | Decrypt |
+|-------|-----|---|-------|--------|---------|---------|
+| L1 | 256 | 2 | 7681 | 2.21 ms (454 ops/s) | 3.37 ms (297 ops/s) | 2.16 ms (463 ops/s) |
+| L3 | 256 | 3 | 7681 | 7.27 ms (138 ops/s) | 12.61 ms (79 ops/s) | 6.14 ms (163 ops/s) |
+| L5 | 256 | 4 | 7681 | 14.45 ms (69 ops/s) | 26.42 ms (38 ops/s) | 12.72 ms (79 ops/s) |
+
+**KEM Performance:**
+| Level | n | k | q | KeyGen | Encaps | Decaps |
+|-------|-----|---|-------|--------|--------|--------|
+| L1 | 256 | 2 | 7681 | 3.92 ms (255 ops/s) | 4.02 ms (249 ops/s) | 5.94 ms (168 ops/s) |
+| L3 | 256 | 3 | 7681 | 10.42 ms (96 ops/s) | 12.48 ms (80 ops/s) | 22.16 ms (45 ops/s) |
+| L5 | 256 | 4 | 7681 | 15.82 ms (63 ops/s) | 26.59 ms (38 ops/s) | 38.43 ms (26 ops/s) |
+
+**Sizes (with Kyber-style bit-packing):**
+| Level | Public Key | Secret Key (PKE) | Secret Key (KEM) | Ciphertext | Shared Secret |
+|-------|------------|------------------|------------------|------------|---------------|
+| L1 | 3,328 bytes | 832 bytes | 5,056 bytes | 1,696 bytes | 32 bytes |
+| L3 | 7,488 bytes | 1,248 bytes | 10,048 bytes | 3,776 bytes | 32 bytes |
+| L5 | 13,312 bytes | 1,664 bytes | 16,704 bytes | 6,688 bytes | 32 bytes |
+
+### Python Implementation Benchmarks
+
 Benchmarks on typical hardware (single-threaded Python):
 
-| Level | KeyGen | Encrypt | Decrypt |
-|-------|--------|---------|---------|
-| toy | ~40 ms | ~60 ms | ~25 ms |
-| L1 | ~240 ms | ~370 ms | ~140 ms |
+| Level | n | k | KeyGen | Encrypt | Decrypt |
+|-------|-----|---|--------|---------|---------|
+| toy | 64 | 2 | ~90 ms | ~140 ms | ~25 ms |
+| L1 | 256 | 2 | ~290 ms | ~630 ms | ~180 ms |
+| L3 | 256 | 3 | ~520 ms | ~510 ms | ~150 ms |
+| L5 | 256 | 4 | ~1120 ms | ~1420 ms | ~360 ms |
 
 Note: Performance can be improved 10-100x with:
 - C/Rust implementation

@@ -30,9 +30,9 @@ Security Features
 
 NIST Security Levels
 --------------------
-- L1: 128-bit security (n=256, k=2, q=4609)
-- L3: 192-bit security (n=256, k=3, q=4609)
-- L5: 256-bit security (n=256, k=4, q=4609)
+- L1: 128-bit security (n=256, k=2, q=7681)
+- L3: 192-bit security (n=256, k=3, q=7681)
+- L5: 256-bit security (n=256, k=4, q=7681)
 
 Usage Example
 -------------
@@ -76,6 +76,14 @@ __all__ = [
     # Polynomial operations
     "poly_extended_gcd",
     "poly_inverse_mod",
+    # Kyber-style encoding
+    "poly_encode",
+    "poly_decode",
+    "poly_compress",
+    "poly_decompress",
+    "compress",
+    "decompress",
+    "get_encoding_bits",
     # Parameters
     "SecurityParameters",
     "SECURITY_LEVELS",
@@ -484,6 +492,149 @@ _sc_protect = SideChannelProtection()
 
 
 # =============================================================================
+# Kyber-style Encoding/Decoding for Compact Serialization
+# =============================================================================
+
+def poly_encode(coeffs: np.ndarray, bits: int) -> bytes:
+    """
+    Encode polynomial coefficients using bit-packing (Kyber-style).
+    
+    Packs coefficients using exactly 'bits' bits per coefficient.
+    For q=7681, we need 13 bits per coefficient.
+    
+    Args:
+        coeffs: Numpy array of polynomial coefficients
+        bits: Number of bits per coefficient
+    
+    Returns:
+        Packed bytes
+    """
+    n = len(coeffs)
+    # Total bits needed
+    total_bits = n * bits
+    # Round up to bytes
+    total_bytes = (total_bits + 7) // 8
+    
+    result = bytearray(total_bytes)
+    bit_pos = 0
+    
+    for coeff in coeffs:
+        c = int(coeff) & ((1 << bits) - 1)  # Mask to bits
+        # Pack bits into result
+        for b in range(bits):
+            if c & (1 << b):
+                byte_idx = bit_pos // 8
+                bit_idx = bit_pos % 8
+                result[byte_idx] |= (1 << bit_idx)
+            bit_pos += 1
+    
+    return bytes(result)
+
+
+def poly_decode(data: bytes, n: int, bits: int, q: int) -> np.ndarray:
+    """
+    Decode polynomial coefficients from bit-packed bytes (Kyber-style).
+    
+    Args:
+        data: Packed bytes
+        n: Number of coefficients
+        bits: Number of bits per coefficient
+        q: Modulus for reduction
+    
+    Returns:
+        Numpy array of coefficients
+    """
+    coeffs = np.zeros(n, dtype=np.int64)
+    bit_pos = 0
+    
+    for i in range(n):
+        c = 0
+        for b in range(bits):
+            byte_idx = bit_pos // 8
+            bit_idx = bit_pos % 8
+            if byte_idx < len(data) and (data[byte_idx] & (1 << bit_idx)):
+                c |= (1 << b)
+            bit_pos += 1
+        coeffs[i] = c % q
+    
+    return coeffs
+
+
+def compress(x: int, q: int, d: int) -> int:
+    """
+    Compress a value from Z_q to Z_{2^d} (Kyber compression).
+    
+    Compress_q(x, d) = round((2^d / q) * x) mod 2^d
+    
+    Args:
+        x: Value in [0, q)
+        q: Original modulus
+        d: Number of bits for compressed value
+    
+    Returns:
+        Compressed value in [0, 2^d)
+    """
+    # round((2^d * x) / q) mod 2^d
+    return ((x << d) + q // 2) // q & ((1 << d) - 1)
+
+
+def decompress(x: int, q: int, d: int) -> int:
+    """
+    Decompress a value from Z_{2^d} to Z_q (Kyber decompression).
+    
+    Decompress_q(x, d) = round((q / 2^d) * x)
+    
+    Args:
+        x: Compressed value in [0, 2^d)
+        q: Target modulus
+        d: Number of bits in compressed value
+    
+    Returns:
+        Decompressed value in [0, q)
+    """
+    # round((q * x) / 2^d)
+    return ((q * x) + (1 << (d - 1))) >> d
+
+
+def poly_compress(coeffs: np.ndarray, q: int, d: int) -> bytes:
+    """
+    Compress and encode polynomial coefficients.
+    
+    Args:
+        coeffs: Polynomial coefficients in [0, q)
+        q: Modulus
+        d: Compression bits (output uses d bits per coefficient)
+    
+    Returns:
+        Compressed and packed bytes
+    """
+    compressed = np.array([compress(int(c), q, d) for c in coeffs], dtype=np.int64)
+    return poly_encode(compressed, d)
+
+
+def poly_decompress(data: bytes, n: int, q: int, d: int) -> np.ndarray:
+    """
+    Decode and decompress polynomial coefficients.
+    
+    Args:
+        data: Compressed packed bytes
+        n: Number of coefficients
+        q: Target modulus
+        d: Compression bits
+    
+    Returns:
+        Decompressed coefficients in [0, q)
+    """
+    compressed = poly_decode(data, n, d, 1 << d)
+    return np.array([decompress(int(c), q, d) for c in compressed], dtype=np.int64)
+
+
+def get_encoding_bits(q: int) -> int:
+    """Get number of bits needed to encode coefficients mod q."""
+    return q.bit_length()
+
+
+# =============================================================================
 # NIST Security Level Parameters
 # =============================================================================
 
@@ -513,8 +664,8 @@ class SecurityParameters:
 SECURITY_LEVELS: Dict[str, SecurityParameters] = {
     "L1": SecurityParameters(
         name="DLPL-256 (NIST L1)",
-        n=128,
-        q=3329,      # 3329 ≡ 1 (mod 256), Kyber prime
+        n=256,
+        q=7681,      # 7681 ≡ 1 (mod 512), NTT-friendly for n=256
         k=2,
         eta_s=3,
         eta_e=3,
@@ -522,17 +673,17 @@ SECURITY_LEVELS: Dict[str, SecurityParameters] = {
     ),
     "L3": SecurityParameters(
         name="DLPL-384 (NIST L3)",
-        n=128,
-        q=3329,      # 3329 ≡ 1 (mod 256), Kyber prime
+        n=256,
+        q=7681,      # 7681 ≡ 1 (mod 512), NTT-friendly for n=256
         k=3,
         eta_s=2,
         eta_e=2,
         security_bits=192
     ),
     "L5": SecurityParameters(
-        name="DLPL-512 (NIST L5)",
-        n=128,
-        q=3329,      # 3329 ≡ 1 (mod 256), Kyber prime
+        name="DLPL-1024 (NIST L5)",
+        n=256,
+        q=7681,      # 7681 ≡ 1 (mod 512), NTT-friendly for n=256
         k=4,
         eta_s=2,
         eta_e=2,
@@ -566,7 +717,7 @@ class NTT:
     Number Theoretic Transform for fast polynomial multiplication in R_q = Z_q[x]/(x^n + 1).
     
     Uses the negacyclic NTT which computes multiplication modulo (x^n + 1).
-    For negacyclic convolution, we need a primitive 2n-th root of unity ψ such that ψ^n = -1.
+    Implementation follows the same algorithm as the C code.
     """
     
     def __init__(self, n: int, q: int):
@@ -575,7 +726,7 @@ class NTT:
         
         Args:
             n: Polynomial degree (must be power of 2)
-            q: Prime modulus (must satisfy q ≡ 1 mod 2n for negacyclic NTT)
+            q: Prime modulus
         """
         self.n = n
         self.q = q
@@ -583,69 +734,55 @@ class NTT:
         # Verify n is power of 2
         assert n > 0 and (n & (n - 1)) == 0, "n must be a power of 2"
         
-        # For negacyclic NTT, we need q ≡ 1 (mod 2n) to have primitive 2n-th roots
-        if (q - 1) % (2 * n) != 0:
-            raise ValueError(f"q-1 = {q-1} must be divisible by 2n = {2*n} for negacyclic NTT")
+        # Compute log2(n)
+        self.log_n = n.bit_length() - 1
         
-        # Find primitive 2n-th root of unity ψ such that ψ^(2n) = 1 and ψ^n = -1
-        self.psi = self._find_primitive_root(2 * n, q)
+        # Find generator g of Z_q^*
+        g = self._find_generator(q)
+        
+        # psi = g^((q-1)/(2n)) is primitive 2n-th root of unity
+        # The C code does: psi = g^((q-1)/(2n))
+        self.psi = pow(g, (q - 1) // (2 * n), q)
         self.psi_inv = pow(self.psi, -1, q)
         self.n_inv = pow(n, -1, q)
         
-        # ω = ψ^2 is a primitive n-th root of unity
-        self.omega = pow(self.psi, 2, q)
+        # omega = psi^2 is primitive n-th root of unity
+        self.omega = (self.psi * self.psi) % q
         self.omega_inv = pow(self.omega, -1, q)
         
-        # Precompute powers of ψ for pre/post-multiplication
-        self.psi_powers = self._precompute_powers(self.psi, n)
-        self.psi_inv_powers = self._precompute_powers(self.psi_inv, n)
+        # Precompute powers (same as C but without Montgomery for simplicity)
+        self.psi_powers = np.zeros(n, dtype=np.int64)
+        self.psi_inv_powers = np.zeros(n, dtype=np.int64)
+        self.omega_powers = np.zeros(n, dtype=np.int64)
+        self.omega_inv_powers = np.zeros(n, dtype=np.int64)
+        
+        psi_pow = 1
+        psi_inv_pow = 1
+        omega_pow = 1
+        omega_inv_pow = 1
+        
+        for i in range(n):
+            self.psi_powers[i] = psi_pow
+            self.psi_inv_powers[i] = psi_inv_pow
+            self.omega_powers[i] = omega_pow
+            self.omega_inv_powers[i] = omega_inv_pow
+            
+            psi_pow = (psi_pow * self.psi) % q
+            psi_inv_pow = (psi_inv_pow * self.psi_inv) % q
+            omega_pow = (omega_pow * self.omega) % q
+            omega_inv_pow = (omega_inv_pow * self.omega_inv) % q
         
         # Precompute bit-reversal permutation
         self.bit_rev = self._precompute_bit_reversal(n)
     
     @staticmethod
-    def _find_primitive_root(order: int, q: int) -> int:
-        """Find a primitive root of unity of given order modulo q."""
-        # q - 1 must be divisible by order
-        if (q - 1) % order != 0:
-            raise ValueError(f"q-1 = {q-1} is not divisible by {order}")
-        
-        # Find generator by trying small values
-        for g in range(2, min(q, 10000)):
-            # Candidate is g^((q-1)/order)
-            candidate = pow(g, (q - 1) // order, q)
-            if candidate == 1:
-                continue
-            
-            # Verify it's a primitive root of the correct order
-            # Check that candidate^order = 1 and candidate^(order/p) ≠ 1 for prime factors p
-            if pow(candidate, order, q) != 1:
-                continue
-            
-            # Check primitivity: for each prime factor p of order, candidate^(order/p) ≠ 1
-            is_primitive = True
-            temp = order
-            for p in [2]:  # order = 2n is a power of 2, so 2 is the only prime factor
-                while temp % p == 0:
-                    if pow(candidate, order // p, q) == 1:
-                        is_primitive = False
-                        break
-                    temp //= p
-                if not is_primitive:
-                    break
-            
-            if is_primitive:
-                return candidate
-        
-        raise ValueError(f"No primitive {order}-th root of unity found mod {q}")
-    
-    def _precompute_powers(self, base: int, n: int) -> np.ndarray:
-        """Precompute powers of base: base^0, base^1, ..., base^(n-1)"""
-        powers = np.zeros(n, dtype=np.int64)
-        powers[0] = 1
-        for i in range(1, n):
-            powers[i] = (powers[i-1] * base) % self.q
-        return powers
+    def _find_generator(q: int) -> int:
+        """Find a generator g of Z_q^* (primitive root mod q)."""
+        for g in range(2, q):
+            # Check if g^((q-1)/2) = -1 mod q (i.e., g is a quadratic non-residue)
+            if pow(g, (q - 1) // 2, q) == q - 1:
+                return g
+        raise ValueError(f"No generator found for Z_{q}^*")
     
     def _precompute_bit_reversal(self, n: int) -> np.ndarray:
         """Precompute bit-reversal permutation."""
@@ -668,37 +805,42 @@ class NTT:
         """
         Compute forward negacyclic NTT: a -> â
         
-        Uses Cooley-Tukey butterfly with pre-scaling by powers of ψ.
-        The negacyclic property comes from multiplying by ψ^i before standard NTT.
+        Matches C implementation:
+        1. Pre-multiply by psi^i for negacyclic
+        2. Bit-reversal permutation
+        3. Cooley-Tukey butterflies
         """
         a = np.array(a, dtype=np.int64) % self.q
         n = self.n
+        q = self.q
         
-        # Pre-multiply by powers of ψ for negacyclic convolution
-        # This converts multiplication mod (x^n + 1) to mod (x^n - 1)
+        # Pre-multiply by psi^i for negacyclic
         for i in range(n):
-            a[i] = (a[i] * self.psi_powers[i]) % self.q
+            a[i] = (a[i] * self.psi_powers[i]) % q
         
         # Bit-reversal permutation
         a_br = np.zeros(n, dtype=np.int64)
         for i in range(n):
-            a_br[self.bit_rev[i]] = a[i]
+            a_br[int(self.bit_rev[i])] = a[i]
         a = a_br
         
-        # Cooley-Tukey butterfly
+        # Cooley-Tukey butterflies
         length = 2
         while length <= n:
-            half = length // 2
+            half = length >> 1
             step = n // length
+            
             for i in range(0, n, length):
-                w = 1
                 for j in range(half):
-                    u = a[i + j]
-                    v = (a[i + j + half] * w) % self.q
-                    a[i + j] = (u + v) % self.q
-                    a[i + j + half] = (u - v) % self.q
-                    w = (w * pow(self.omega, step, self.q)) % self.q
-            length *= 2
+                    w = int(self.omega_powers[j * step])
+                    
+                    u = int(a[i + j])
+                    v = (int(a[i + j + half]) * w) % q
+                    
+                    a[i + j] = (u + v) % q
+                    a[i + j + half] = (u - v + q) % q
+            
+            length <<= 1
         
         return a
     
@@ -706,35 +848,47 @@ class NTT:
         """
         Compute inverse negacyclic NTT: â -> a
         
-        Uses Gentleman-Sande butterfly with post-scaling.
+        Matches C implementation:
+        1. Bit-reversal permutation
+        2. Cooley-Tukey butterflies with inverse twiddles
+        3. Scale by n^-1
+        4. Post-multiply by psi^(-i) for negacyclic
         """
         a = np.array(a_hat, dtype=np.int64) % self.q
         n = self.n
-        
-        # Gentleman-Sande (decimation-in-frequency) inverse NTT
-        length = n
-        while length >= 2:
-            half = length // 2
-            step = n // length
-            for i in range(0, n, length):
-                w = 1
-                for j in range(half):
-                    u = a[i + j]
-                    v = a[i + j + half]
-                    a[i + j] = (u + v) % self.q
-                    a[i + j + half] = ((u - v) * w) % self.q
-                    w = (w * pow(self.omega_inv, step, self.q)) % self.q
-            length //= 2
+        q = self.q
         
         # Bit-reversal permutation
         a_br = np.zeros(n, dtype=np.int64)
         for i in range(n):
-            a_br[self.bit_rev[i]] = a[i]
+            a_br[int(self.bit_rev[i])] = a[i]
         a = a_br
         
-        # Scale by n^(-1) and post-multiply by powers of ψ^(-1)
+        # Cooley-Tukey butterflies with inverse twiddles
+        length = 2
+        while length <= n:
+            half = length >> 1
+            step = n // length
+            
+            for i in range(0, n, length):
+                for j in range(half):
+                    w = int(self.omega_inv_powers[j * step])
+                    
+                    u = int(a[i + j])
+                    v = (int(a[i + j + half]) * w) % q
+                    
+                    a[i + j] = (u + v) % q
+                    a[i + j + half] = (u - v + q) % q
+            
+            length <<= 1
+        
+        # Scale by n^-1
         for i in range(n):
-            a[i] = (a[i] * self.n_inv * self.psi_inv_powers[i]) % self.q
+            a[i] = (a[i] * self.n_inv) % q
+        
+        # Post-multiply by psi^(-i) for negacyclic
+        for i in range(n):
+            a[i] = (a[i] * self.psi_inv_powers[i]) % q
         
         return a
     
@@ -1023,9 +1177,33 @@ class RingElement:
         return int(np.max(np.abs(centered)))
     
     def to_bytes(self) -> bytes:
-        """Convert to bytes for hashing."""
+        """Convert to bytes using Kyber-style bit-packing."""
+        a = self.from_ntt() if self._ntt_form else self
+        bits = get_encoding_bits(self.q)
+        return poly_encode(a.coeffs, bits)
+    
+    def to_bytes_raw(self) -> bytes:
+        """Convert to raw bytes (for hashing, not serialization)."""
         a = self.from_ntt() if self._ntt_form else self
         return a.coeffs.astype(np.int64).tobytes()
+    
+    def to_bytes_compressed(self, d: int) -> bytes:
+        """Convert to compressed bytes using d bits per coefficient."""
+        a = self.from_ntt() if self._ntt_form else self
+        return poly_compress(a.coeffs, self.q, d)
+    
+    @classmethod
+    def from_bytes(cls, data: bytes, n: int, q: int) -> 'RingElement':
+        """Create RingElement from Kyber-style bit-packed bytes."""
+        bits = get_encoding_bits(q)
+        coeffs = poly_decode(data, n, bits, q)
+        return cls(coeffs, n, q)
+    
+    @classmethod
+    def from_bytes_compressed(cls, data: bytes, n: int, q: int, d: int) -> 'RingElement':
+        """Create RingElement from compressed bytes."""
+        coeffs = poly_decompress(data, n, q, d)
+        return cls(coeffs, n, q)
     
     @classmethod
     def zero(cls, n: int, q: int) -> 'RingElement':
@@ -1149,16 +1327,22 @@ class GeneralMatrix:
         """Convert to bytes for hashing"""
         return b''.join(block.to_bytes() for block in self.blocks)
     
+    def poly_bytes_size(self) -> int:
+        """Get the byte size of one polynomial with Kyber encoding."""
+        bits = get_encoding_bits(self.q)
+        return (self.n * bits + 7) // 8
+    
     @classmethod
     def from_bytes(cls, data: bytes, k: int, n: int, q: int) -> 'GeneralMatrix':
-        """Reconstruct GeneralMatrix from bytes."""
-        coeff_bytes = n * 8  # int64
+        """Reconstruct GeneralMatrix from Kyber-style encoded bytes."""
+        bits = get_encoding_bits(q)
+        poly_bytes = (n * bits + 7) // 8
         blocks = []
         for i in range(k * k):
-            start = i * coeff_bytes
-            end = start + coeff_bytes
-            coeffs = np.frombuffer(data[start:end], dtype=np.int64).copy()
-            blocks.append(RingElement(coeffs, n, q))
+            start = i * poly_bytes
+            end = start + poly_bytes
+            block = RingElement.from_bytes(data[start:end], n, q)
+            blocks.append(block)
         return cls(blocks, n, q, k)
     
     def __repr__(self) -> str:
@@ -1409,69 +1593,78 @@ class BlockCirculantMatrix:
         Inverse for k=4 block-circulant matrix using DFT decomposition.
         
         BC_4(R_q) decomposes via 4th roots of unity.
+        Eigenvalues: λ_j = a + ω^j*b + ω^(2j)*c + ω^(3j)*d
+        where ω = i (primitive 4th root, ω² = -1)
+        
+        λ_0 = a + b + c + d
+        λ_1 = (a - c) + i(b - d)  [complex]
+        λ_2 = a - b + c - d
+        λ_3 = (a - c) - i(b - d)  [conjugate of λ_1]
+        
+        det(M) = λ_0 * λ_1 * λ_2 * λ_3 = λ_0 * λ_2 * |λ_1|²
+        |λ_1|² = (a-c)² + (b-d)²
         """
         a, b, c, d = self.first_row
         
-        # Use eigenvalue decomposition
-        # λ_j = a + b*ω^j + c*ω^(2j) + d*ω^(3j) for j=0,1,2,3
-        # where ω is primitive 4th root of unity
-        # In R_q: ω = sqrt(-1) if it exists, else work symbolically
+        # Compute eigenvalues (real parts)
+        lam0 = a + b + c + d        # λ_0
+        lam2 = a - b + c - d        # λ_2
         
-        # For 4th roots: ω^2 = -1
-        # λ_0 = a + b + c + d
-        # λ_1 = a + b*i - c - d*i = (a - c) + i(b - d)
-        # λ_2 = a - b + c - d
-        # λ_3 = a - b*i - c + d*i = (a - c) - i(b - d)
-        
-        # Simplified approach: use direct formula
-        # det = (a+b+c+d)(a-b+c-d)((a-c)² + (b-d)²)
-        
-        sum_all = a + b + c + d
-        alt_sum = a - b + c - d
+        # For λ_1 = (a-c) + i(b-d): |λ_1|² = (a-c)² + (b-d)²
         diff_ac = a - c
         diff_bd = b - d
+        lam1_norm = (diff_ac * diff_ac) + (diff_bd * diff_bd)
         
-        # Product of first two eigenvalues
-        prod1 = sum_all * alt_sum
+        # Compute individual eigenvalue inverses
+        lam0_inv = lam0.inverse()
+        lam2_inv = lam2.inverse()
+        lam1_norm_inv = lam1_norm.inverse()
         
-        # Product related to complex eigenvalues: (a-c)² + (b-d)²
-        prod2 = (diff_ac * diff_ac) + (diff_bd * diff_bd)
-        
-        det = prod1 * prod2
-        det_inv = det.inverse()
-        
-        if det_inv is None:
+        if lam0_inv is None or lam2_inv is None or lam1_norm_inv is None:
             return None
         
-        # Compute inverse via adjugate
-        # This is complex, so use iterative verification
-        # Simplified: compute using formula
+        # λ_1^(-1) = conj(λ_1) / |λ_1|² = ((a-c) - i(b-d)) / |λ_1|²
+        # Re(λ_1^(-1)) = (a-c) / |λ_1|²
+        # Im(λ_1^(-1)) = -(b-d) / |λ_1|²
+        lam1_inv_re = diff_ac * lam1_norm_inv
+        lam1_inv_im = (-diff_bd) * lam1_norm_inv
         
-        # For circulant matrices, inverse is also circulant
-        # Use the eigenvalue inverse approach
+        # Inverse DFT to get M^(-1) row:
+        # M^(-1)[0,j] = (1/4) * Σ_k ω^(-jk) * λ_k^(-1)
+        # 
+        # r0 = (1/4)(λ_0^-1 + λ_1^-1 + λ_2^-1 + λ_3^-1)
+        #    = (1/4)(λ_0^-1 + λ_2^-1 + 2*Re(λ_1^-1))
+        # r1 = (1/4)(λ_0^-1 - i*λ_1^-1 - λ_2^-1 + i*λ_3^-1)
+        #    = (1/4)(λ_0^-1 - λ_2^-1 + 2*Im(λ_1^-1))
+        # r2 = (1/4)(λ_0^-1 - λ_1^-1 + λ_2^-1 - λ_3^-1)
+        #    = (1/4)(λ_0^-1 + λ_2^-1 - 2*Re(λ_1^-1))
+        # r3 = (1/4)(λ_0^-1 + i*λ_1^-1 - λ_2^-1 - i*λ_3^-1)
+        #    = (1/4)(λ_0^-1 - λ_2^-1 - 2*Im(λ_1^-1))
         
-        # λ_j^(-1) gives the eigenvalues of the inverse
-        # Then apply inverse DFT
+        sum_lam_inv = lam0_inv + lam2_inv
+        diff_lam_inv = lam0_inv - lam2_inv
+        two_re = lam1_inv_re + lam1_inv_re
+        two_im = lam1_inv_im + lam1_inv_im
         
-        # Approximate using the k=2 nested structure
-        # BC_4 ≅ BC_2(BC_2(R_q))
+        r0_4 = sum_lam_inv + two_re      # 4*r0
+        r1_4 = diff_lam_inv + two_im     # 4*r1
+        r2_4 = sum_lam_inv - two_re      # 4*r2
+        r3_4 = diff_lam_inv - two_im     # 4*r3
         
-        # First level: [[A, B], [B, A]] where A = [[a,b],[b,a]], B = [[c,d],[d,c]]
-        # This gets complex, fall back to verification
+        # Multiply by 4^-1 mod q
+        four_inv = pow(4, -1, self.q)
         
-        return self._inverse_verify(det_inv)
+        r0 = self._scalar_mul(r0_4, four_inv)
+        r1 = self._scalar_mul(r1_4, four_inv)
+        r2 = self._scalar_mul(r2_4, four_inv)
+        r3 = self._scalar_mul(r3_4, four_inv)
+        
+        return BlockCirculantMatrix([r0, r1, r2, r3], self.n, self.q, self.k)
     
-    def _inverse_verify(self, det_inv: RingElement) -> Optional['BlockCirculantMatrix']:
-        """Compute inverse and verify by multiplication."""
-        # Use adjugate formula (complex for general k)
-        # For now, use numerical approach for k>3
-        
-        # Try to construct inverse using the fact that
-        # in BC_k, the inverse of [a_0, ..., a_{k-1}] is [b_0, ..., b_{k-1}]
-        # where the b_i satisfy certain polynomial equations
-        
-        # Fallback: return None for k > 3 (not implemented)
-        return None
+    def _scalar_mul(self, elem: RingElement, scalar: int) -> RingElement:
+        """Multiply a RingElement by a scalar."""
+        new_coeffs = (elem.coeffs * scalar) % self.q
+        return RingElement(new_coeffs, self.n, self.q, ntt_form=elem._ntt_form)
     
     def _inverse_dft(self) -> Optional['BlockCirculantMatrix']:
         """
@@ -1551,10 +1744,6 @@ class BlockCirculantMatrix:
                     return candidate
         return None
     
-    def _scalar_mul(self, elem: RingElement, scalar: int) -> RingElement:
-        """Multiply a RingElement by a scalar in Z_q."""
-        return RingElement((elem.coeffs * scalar) % self.q, self.n, self.q)
-    
     @classmethod
     def zero(cls, n: int, q: int, k: int) -> 'BlockCirculantMatrix':
         """Return the zero matrix"""
@@ -1573,19 +1762,25 @@ class BlockCirculantMatrix:
         return max(block.norm_inf() for block in self.first_row)
     
     def to_bytes(self) -> bytes:
-        """Convert to bytes for hashing"""
+        """Convert to bytes using Kyber-style bit-packing."""
         return b''.join(block.to_bytes() for block in self.first_row)
+    
+    def poly_bytes_size(self) -> int:
+        """Get the byte size of one polynomial with Kyber encoding."""
+        bits = get_encoding_bits(self.q)
+        return (self.n * bits + 7) // 8
     
     @classmethod
     def from_bytes(cls, data: bytes, k: int, n: int, q: int) -> 'BlockCirculantMatrix':
-        """Reconstruct BlockCirculantMatrix from bytes."""
-        coeff_bytes = n * 8  # int64
+        """Reconstruct BlockCirculantMatrix from Kyber-style encoded bytes."""
+        bits = get_encoding_bits(q)
+        poly_bytes = (n * bits + 7) // 8
         first_row = []
         for i in range(k):
-            start = i * coeff_bytes
-            end = start + coeff_bytes
-            coeffs = np.frombuffer(data[start:end], dtype=np.int64).copy()
-            first_row.append(RingElement(coeffs, n, q))
+            start = i * poly_bytes
+            end = start + poly_bytes
+            block = RingElement.from_bytes(data[start:end], n, q)
+            first_row.append(block)
         return cls(first_row, n, q, k)
     
     def __repr__(self) -> str:
@@ -2362,8 +2557,8 @@ class DLPL_KEM:
     def _deserialize_public_key(self, pk_bytes: bytes) -> Tuple:
         """Deserialize public key from bytes."""
         n, k, q = self.pke.n, self.pke.k, self.pke.q
-        coeff_bytes = 8  # int64 (matching to_bytes which uses .tobytes())
-        poly_bytes = n * coeff_bytes
+        bits = get_encoding_bits(q)
+        poly_bytes = (n * bits + 7) // 8
         matrix_bytes = k * k * poly_bytes
         
         A = GeneralMatrix.from_bytes(pk_bytes[:matrix_bytes], k, n, q)
@@ -2380,8 +2575,8 @@ class DLPL_KEM:
     def _deserialize_secret_key(self, sk_bytes: bytes) -> Tuple:
         """Deserialize secret key."""
         n, k, q = self.pke.n, self.pke.k, self.pke.q
-        coeff_bytes = 8  # int64
-        poly_bytes = n * coeff_bytes
+        bits = get_encoding_bits(q)
+        poly_bytes = (n * bits + 7) // 8
         bc_bytes = k * poly_bytes
         matrix_bytes = k * k * poly_bytes
         pk_bytes_len = 2 * matrix_bytes
@@ -2417,8 +2612,8 @@ class DLPL_KEM:
     def _deserialize_ciphertext(self, ct_bytes: bytes) -> Tuple:
         """Deserialize ciphertext from bytes."""
         n, k, q = self.pke.n, self.pke.k, self.pke.q
-        coeff_bytes = 8  # int64
-        poly_bytes = n * coeff_bytes
+        bits = get_encoding_bits(q)
+        poly_bytes = (n * bits + 7) // 8
         matrix_bytes = k * k * poly_bytes
         
         u = GeneralMatrix.from_bytes(ct_bytes[:matrix_bytes], k, n, q)
@@ -2429,8 +2624,8 @@ class DLPL_KEM:
     def get_sizes(self) -> dict:
         """Return key and ciphertext sizes in bytes."""
         n, k, q = self.pke.n, self.pke.k, self.pke.q
-        coeff_bytes = 8  # int64 (matching serialization)
-        poly_bytes = n * coeff_bytes
+        bits = get_encoding_bits(q)
+        poly_bytes = (n * bits + 7) // 8
         bc_bytes = k * poly_bytes
         matrix_bytes = k * k * poly_bytes
         

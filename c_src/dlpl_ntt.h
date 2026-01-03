@@ -186,7 +186,9 @@ static inline poly_coeff_t to_centered(poly_coeff_t x) {
  * @return Coefficient in [0, q-1]
  */
 static inline poly_coeff_t to_positive(poly_coeff_t x) {
-    return x + (DLPL_Q & -(x >> 15));
+    /* Create mask: all 1s if x < 0, else 0 */
+    int32_t mask = x >> 15;  /* Sign extend to all 1s if negative */
+    return (poly_coeff_t)(x + (DLPL_Q & mask));
 }
 
 #endif /* DLPL_NTT_H */
