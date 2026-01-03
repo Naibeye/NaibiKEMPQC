@@ -1,4 +1,4 @@
-# DLPL-DH: Post-Quantum PKE and KEM
+# DLPL-Schemes: Post-Quantum PKE and KEM
 
 A post-quantum secure **Public Key Encryption (PKE)** and **Key Encapsulation Mechanism (KEM)** based on the **Discrete Logarithm Problem over Lattices (DLPL-DH)**.
 
@@ -6,7 +6,7 @@ A post-quantum secure **Public Key Encryption (PKE)** and **Key Encapsulation Me
 
 This implementation follows the cryptographic scheme described in the paper:
 > *"Discrete Logarithm over Lattices (DLPL): A Structured Generalisation with Practical Post-Quantum Applications"*  
-> — Djimnaibeye Sidoine
+> — Djimnaibeye Sidoine, Djiby Sow and Borgou Mahamat
 
 The scheme operates in the commutative algebra $\text{BC}_k(R_q)$ of **block-circulant matrices** over the polynomial ring $R_q = \mathbb{Z}_q[x]/(x^n + 1)$.
 
