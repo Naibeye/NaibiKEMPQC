@@ -9,6 +9,13 @@
  * - KEM Encapsulation/Decapsulation
  * 
  * Output format follows NIST PQC submission requirements.
+ * 
+ * Supports all security levels:
+ *   L1: n=256, k=2, q=7681 (128-bit security)
+ *   L3: n=256, k=3, q=7681 (192-bit security)
+ *   L5: n=256, k=4, q=7681 (256-bit security)
+ * 
+ * Uses Kyber-style bit-packing (13 bits/coefficient for q=7681)
  */
 
 #include <stdio.h>
@@ -26,6 +33,9 @@
 
 /* Shared secret size */
 #define DLPL_KEM_SS_BYTES DLPL_KEM_SHARED_SECRET_BYTES
+
+/* Derived size calculations for documentation */
+#define DLPL_POLY_BYTES_CALC  ((DLPL_N * DLPL_LOGQ + 7) / 8)
 
 /* Simple deterministic RNG for reproducible test vectors */
 typedef struct {
@@ -111,8 +121,11 @@ static void generate_pke_kat(const char *filename, int num_vectors) {
     }
     
     fprintf(f, "# DLPL-DH-PKE Known Answer Tests\n");
-    fprintf(f, "# Algorithm: DLPL-DH-PKE-256\n");
-    fprintf(f, "# Parameters: n=%d, k=%d, q=%d\n", DLPL_N, DLPL_K, DLPL_Q);
+    fprintf(f, "# Algorithm: DLPL-DH-PKE-%d\n", DLPL_N);
+    fprintf(f, "# Parameters: n=%d, k=%d, q=%d, log_q=%d\n", DLPL_N, DLPL_K, DLPL_Q, DLPL_LOGQ);
+    fprintf(f, "# Encoding: Kyber-style bit-packing (%d bits/coefficient)\n", DLPL_LOGQ);
+    fprintf(f, "# Sizes: pk=%lu, sk=%lu, ct=%lu bytes\n", 
+            (unsigned long)DLPL_PK_BYTES, (unsigned long)DLPL_SK_BYTES, (unsigned long)DLPL_CT_BYTES);
     fprintf(f, "# Generated: %s", __DATE__);
     fprintf(f, "\n\n");
     
@@ -201,9 +214,12 @@ static void generate_kem_kat(const char *filename, int num_vectors) {
     }
     
     fprintf(f, "# DLPL-DH-KEM Known Answer Tests\n");
-    fprintf(f, "# Algorithm: DLPL-DH-KEM-256\n");
-    fprintf(f, "# Parameters: n=%d, k=%d, q=%d\n", DLPL_N, DLPL_K, DLPL_Q);
-    fprintf(f, "# Shared Secret Length: %d bytes\n", DLPL_KEM_SS_BYTES);
+    fprintf(f, "# Algorithm: DLPL-DH-KEM-%d\n", DLPL_N);
+    fprintf(f, "# Parameters: n=%d, k=%d, q=%d, log_q=%d\n", DLPL_N, DLPL_K, DLPL_Q, DLPL_LOGQ);
+    fprintf(f, "# Encoding: Kyber-style bit-packing (%d bits/coefficient)\n", DLPL_LOGQ);
+    fprintf(f, "# Sizes: pk=%lu, sk=%lu, ct=%lu, ss=%d bytes\n", 
+            (unsigned long)DLPL_KEM_PK_BYTES, (unsigned long)DLPL_KEM_SK_BYTES, 
+            (unsigned long)DLPL_KEM_CT_BYTES, DLPL_KEM_SS_BYTES);
     fprintf(f, "# Generated: %s", __DATE__);
     fprintf(f, "\n\n");
     
@@ -396,11 +412,14 @@ static void generate_json_kat(const char *filename, int num_vectors) {
     }
     
     fprintf(f, "{\n");
-    fprintf(f, "  \"algorithm\": \"DLPL-DH-KEM-256\",\n");
+    fprintf(f, "  \"algorithm\": \"DLPL-DH-KEM-%d\",\n", DLPL_N);
     fprintf(f, "  \"parameters\": {\n");
     fprintf(f, "    \"n\": %d,\n", DLPL_N);
     fprintf(f, "    \"k\": %d,\n", DLPL_K);
-    fprintf(f, "    \"q\": %d\n", DLPL_Q);
+    fprintf(f, "    \"q\": %d,\n", DLPL_Q);
+    fprintf(f, "    \"log_q\": %d,\n", DLPL_LOGQ);
+    fprintf(f, "    \"poly_bytes\": %d,\n", DLPL_POLY_BYTES);
+    fprintf(f, "    \"encoding\": \"kyber-style (13 bits/coeff)\"\n");
     fprintf(f, "  },\n");
     fprintf(f, "  \"sizes\": {\n");
     fprintf(f, "    \"public_key\": %lu,\n", (unsigned long)DLPL_KEM_PK_BYTES);
@@ -539,7 +558,14 @@ int main(int argc, char *argv[]) {
     
     printf("DLPL-DH CAVP Test Vector Generator\n");
     printf("===================================\n");
-    printf("Parameters: n=%d, k=%d, q=%d\n\n", DLPL_N, DLPL_K, DLPL_Q);
+    printf("Parameters: n=%d, k=%d, q=%d, log_q=%d\n", DLPL_N, DLPL_K, DLPL_Q, DLPL_LOGQ);
+    printf("Encoding: Kyber-style bit-packing (%d bits/coefficient)\n", DLPL_LOGQ);
+    printf("Sizes:\n");
+    printf("  PKE: pk=%lu, sk=%lu, ct=%lu bytes\n", 
+           (unsigned long)DLPL_PK_BYTES, (unsigned long)DLPL_SK_BYTES, (unsigned long)DLPL_CT_BYTES);
+    printf("  KEM: pk=%lu, sk=%lu, ct=%lu, ss=%d bytes\n\n", 
+           (unsigned long)DLPL_KEM_PK_BYTES, (unsigned long)DLPL_KEM_SK_BYTES, 
+           (unsigned long)DLPL_KEM_CT_BYTES, DLPL_KEM_SS_BYTES);
     
     if (gen_intermediate) {
         generate_intermediate_values(intermediate_file);

@@ -40,7 +40,7 @@ python3 pke_dlpl.py
 ```bash
 cd c_src
 
-# Compile
+# Compile (default: Level 1)
 make
 
 # Run PKE tests
@@ -52,6 +52,227 @@ make
 # Run benchmarks
 ./test_dlpl --bench
 ./test_kem --bench
+```
+
+## Testing Commands
+
+### C Implementation - Complete Test Suite
+
+#### Compile for Specific Security Level
+
+```bash
+cd c_src
+
+# Level 1 (128-bit security, k=2)
+make level1
+
+# Level 3 (192-bit security, k=3)
+make level3
+
+# Level 5 (256-bit security, k=4)
+make level5
+
+# Default (Level 1)
+make
+```
+
+#### Run All Tests
+
+```bash
+# Run PKE tests (keygen, encrypt/decrypt, roundtrip, serialization)
+./test_dlpl
+
+# Run KEM tests (keygen, encaps/decaps, roundtrip, serialization)
+./test_kem
+
+# Run all tests for all security levels
+./test_all_levels.sh
+```
+
+#### Benchmark Performance
+
+```bash
+# PKE benchmarks (timing for keygen, encrypt, decrypt)
+./test_dlpl --bench
+
+# KEM benchmarks (timing for keygen, encaps, decaps)
+./test_kem --bench
+
+# Verbose output with details
+./test_dlpl --verbose
+./test_kem --verbose
+```
+
+#### Generate KAT (Known Answer Tests)
+
+```bash
+# Compile cavp_gen
+make level5  # or any level
+cc -Wall -std=c11 -DDLPL_SECURITY_LEVEL=5 -c cavp_gen.c -o cavp_gen.o
+cc -DDLPL_SECURITY_LEVEL=5 dlpl_ntt.o dlpl_poly.o dlpl_pke.o dlpl_kem.o cavp_gen.o -o cavp_gen -lm
+
+# Generate all KAT files
+./cavp_gen --all --count 100
+
+# Generate only specific KAT files
+./cavp_gen --pke --count 50      # PKE KAT only
+./cavp_gen --kem --count 50      # KEM KAT only
+./cavp_gen --json --count 10     # JSON format only
+./cavp_gen --intermediate        # Intermediate values
+
+# Output files:
+# - PQCkemKAT_PKE.rsp   (PKE test vectors)
+# - PQCkemKAT_KEM.rsp   (KEM test vectors)
+# - kat.json            (JSON format)
+# - intermediate_values.txt
+```
+
+#### Clean Build
+
+```bash
+# Remove all compiled objects and executables
+make clean
+
+# Full rebuild
+make clean && make level1
+```
+
+### Python Implementation - Tests
+
+```bash
+cd NaibiPQC
+
+# Run all tests (PKE + KEM)
+python3 pke_dlpl.py
+
+# Run with specific security level
+python3 -c "
+from pke_dlpl import DLPL_PKE_Full, DLPL_KEM
+
+# Test PKE
+pke = DLPL_PKE_Full.from_security_level('L1')
+pk, sk = pke.keygen()
+msg = b'Test message'
+ct = pke.encrypt(msg)
+dec = pke.decrypt(ct)
+print(f'PKE: {dec.rstrip(chr(0).encode()) == msg}')
+
+# Test KEM
+kem = DLPL_KEM.from_security_level('L1')
+pk, sk = kem.keygen()
+ct, ss1 = kem.encaps(pk)
+ss2 = kem.decaps(ct, sk)
+print(f'KEM: {ss1 == ss2}')
+"
+
+# Run benchmarks
+python3 benchmark_comparison.py
+```
+
+### Verify KAT Files
+
+```bash
+cd NaibiPQC
+
+# Generate KAT files first (in c_src)
+cd c_src && ./cavp_gen --all --count 5 && cd ..
+
+# Verify KAT files
+python3 verify_kat.py
+```
+
+### Cross-Implementation Verification
+
+```bash
+# 1. Generate KAT with C implementation
+cd c_src
+make level1
+./cavp_gen --all --count 10
+cd ..
+
+# 2. Verify with Python
+python3 verify_kat.py
+
+# Expected output:
+# KEM Results: 10 passed, 0 failed
+# PKE Results: 10 passed, 0 failed
+# JSON: Valid vectors: 10/10
+# Intermediate values: All PASS
+```
+
+### Test All Security Levels (Automated)
+
+```bash
+cd c_src
+
+# Create test script if not exists
+cat > run_all_tests.sh << 'EOF'
+#!/bin/bash
+set -e
+echo "=== Testing All Security Levels ==="
+
+for level in 1 3 5; do
+    echo ""
+    echo "=== Level $level ==="
+    make clean
+    make level$level
+    echo "--- PKE Tests ---"
+    ./test_dlpl
+    echo "--- KEM Tests ---"
+    ./test_kem
+    echo "--- Benchmarks ---"
+    ./test_dlpl --bench
+    ./test_kem --bench
+done
+
+echo ""
+echo "=== ALL TESTS PASSED ==="
+EOF
+chmod +x run_all_tests.sh
+
+# Run all tests
+./run_all_tests.sh
+```
+
+### Memory and Sanitizer Tests
+
+```bash
+cd c_src
+
+# Compile with AddressSanitizer (detect memory errors)
+make clean
+CFLAGS="-fsanitize=address -g" make level1
+./test_dlpl
+./test_kem
+
+# Compile with UndefinedBehaviorSanitizer
+make clean
+CFLAGS="-fsanitize=undefined -g" make level1
+./test_dlpl
+./test_kem
+
+# Valgrind memory check
+make clean && make level1
+valgrind --leak-check=full ./test_dlpl
+valgrind --leak-check=full ./test_kem
+```
+
+### Expected Test Output
+
+```
+=== DLPL-DH PKE Tests ===
+Parameters: n=256, k=2, q=7681
+Test 1: NTT roundtrip .............. PASS
+Test 2: Polynomial multiplication .. PASS
+Test 3: Key generation ............. PASS
+Test 4: Encrypt/Decrypt ............ PASS
+Test 5: Public key serialization ... PASS
+Test 6: Secret key serialization ... PASS
+Test 7: Ciphertext serialization ... PASS
+Test 8: Zero message ............... PASS
+Test 9: Random messages (100x) ..... PASS
+=========================================
+All 9 tests PASSED!
 ```
 
 ## Quick Start
@@ -386,6 +607,95 @@ def poly_inverse_mod(a: np.ndarray, n: int, q: int) -> Optional[np.ndarray]
     """Compute inverse of polynomial a in R_q = Z_q[x]/(x^n + 1)."""
 ```
 
+### Serialization (Kyber-style Encoding)
+
+Compact bit-packing for polynomial coefficients, reducing storage by ~60-80%.
+
+```python
+def get_encoding_bits(q: int) -> int
+    """Get number of bits needed to encode coefficients mod q.
+    Returns ceil(log2(q)). For q=7681, returns 13 bits."""
+
+def poly_encode(coeffs: np.ndarray, n: int, bits: int) -> bytes
+    """Encode polynomial coefficients using bit-packing.
+    
+    Args:
+        coeffs: Array of n coefficients in [0, q-1]
+        n: Polynomial degree
+        bits: Bits per coefficient (e.g., 13 for q=7681)
+    
+    Returns:
+        Packed bytes of length (n * bits + 7) // 8
+    
+    Example:
+        For n=256, bits=13: 256 coefficients → 416 bytes (vs 512 raw)
+    """
+
+def poly_decode(data: bytes, n: int, bits: int) -> np.ndarray
+    """Decode bit-packed bytes back to polynomial coefficients.
+    
+    Args:
+        data: Packed bytes from poly_encode
+        n: Polynomial degree
+        bits: Bits per coefficient
+    
+    Returns:
+        Array of n coefficients
+    """
+
+def compress(coeffs: np.ndarray, q: int, d: int) -> np.ndarray
+    """Lossy compression of coefficients to d bits (Kyber-style).
+    
+    Computes: round(2^d / q * x) mod 2^d
+    
+    Args:
+        coeffs: Coefficients in [0, q-1]
+        q: Modulus
+        d: Target bits (typically 10-12)
+    
+    Returns:
+        Compressed coefficients in [0, 2^d - 1]
+    """
+
+def decompress(coeffs: np.ndarray, q: int, d: int) -> np.ndarray
+    """Decompress coefficients from d bits back to mod q.
+    
+    Computes: round(q / 2^d * x)
+    
+    Args:
+        coeffs: Compressed coefficients in [0, 2^d - 1]
+        q: Target modulus
+        d: Source bits
+    
+    Returns:
+        Decompressed coefficients in [0, q-1]
+    """
+```
+
+#### Size Comparison
+
+| Encoding | Bytes per Polynomial (n=256) | Reduction |
+|----------|------------------------------|-----------|
+| Raw int64 | 2,048 bytes | — |
+| Raw int16 | 512 bytes | 75% |
+| **Kyber-style (13-bit)** | **416 bytes** | **80%** |
+| Compressed (10-bit) | 320 bytes | 84% |
+
+#### C Implementation
+
+```c
+/* In dlpl_poly.c */
+
+// Encode polynomial to bytes using bit-packing
+void poly_to_bytes(uint8_t *out, const poly_t *p);
+
+// Decode polynomial from bit-packed bytes  
+void poly_from_bytes(poly_t *p, const uint8_t *in);
+
+// Size macro: (n * LOGQ + 7) / 8 bytes per polynomial
+#define DLPL_POLY_BYTES  ((DLPL_N * DLPL_LOGQ + 7) / 8)  // 416 for n=256, q=7681
+```
+
 ## Mathematical Background
 
 ### Ring Structure
@@ -551,14 +861,30 @@ where $r$ is a random invertible element.
 
 ### Python Implementation Benchmarks
 
-Benchmarks on typical hardware (single-threaded Python):
+**PKE Benchmarks** (single-threaded Python, NumPy):
 
 | Level | n | k | KeyGen | Encrypt | Decrypt |
 |-------|-----|---|--------|---------|---------|
-| toy | 64 | 2 | ~90 ms | ~140 ms | ~25 ms |
-| L1 | 256 | 2 | ~290 ms | ~630 ms | ~180 ms |
-| L3 | 256 | 3 | ~520 ms | ~510 ms | ~150 ms |
-| L5 | 256 | 4 | ~1120 ms | ~1420 ms | ~360 ms |
+| toy | 64 | 2 | ~166 ms | ~112 ms | ~18 ms |
+| L1 | 256 | 2 | ~261 ms | ~434 ms | ~93 ms |
+| L3 | 256 | 3 | ~290 ms | ~465 ms | ~132 ms |
+| L5 | 256 | 4 | ~620 ms | ~1216 ms | ~345 ms |
+
+**KEM Benchmarks** (single-threaded Python, NumPy):
+
+| Level | n | k | KeyGen | Encaps | Decaps |
+|-------|-----|---|--------|--------|--------|
+| L1 | 256 | 2 | ~476 ms | ~281 ms | ~423 ms |
+| L3 | 256 | 3 | ~375 ms | ~391 ms | ~471 ms |
+| L5 | 256 | 4 | ~850 ms | ~1137 ms | ~1219 ms |
+
+**Python Sizes (with Kyber-style bit-packing):**
+
+| Level | Public Key | Secret Key (KEM) | Ciphertext | Shared Secret |
+|-------|------------|------------------|------------|---------------|
+| L1 | 3,328 bytes | 5,056 bytes | 1,696 bytes | 32 bytes |
+| L3 | 7,488 bytes | 10,048 bytes | 3,776 bytes | 32 bytes |
+| L5 | 13,312 bytes | 16,704 bytes | 6,688 bytes | 32 bytes |
 
 Note: Performance can be improved 10-100x with:
 - C/Rust implementation

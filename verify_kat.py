@@ -6,6 +6,8 @@ This script reads the generated KAT files and verifies:
 1. PKE encrypt/decrypt consistency
 2. KEM encaps/decaps consistency
 3. JSON format parsing
+
+Supports all security levels: L1 (k=2), L3 (k=3), L5 (k=4)
 """
 
 import os
@@ -13,28 +15,51 @@ import json
 import hashlib
 from pathlib import Path
 
-# Parameters matching C implementation (Level 5: n=256, k=3, q=7681)
+# Parameters matching C implementation with Kyber-style bit-packing
+# q = 7681, n = 256, LOGQ = 13 bits
+# poly_bytes = (n * LOGQ + 7) // 8 = (256 * 13 + 7) // 8 = 416 bytes
+
 N = 256
-K = 3
 Q = 7681
+LOGQ = 13
+POLY_BYTES = (N * LOGQ + 7) // 8  # 416 bytes per polynomial
 
-# Key/CT sizes (from C implementation) for Level 5
-# PK = (K*K + K) * N * 2 bytes = (9 + 3) * 256 * 2 = 6144... actually let's compute properly
-# For DLPL: pk = A (k*k polys) + b (k polys) serialized
-# Each poly is N * sizeof(int16_t) = N * 2 bytes
-# pk = (K*K + K) * N * 2 = 12 * 256 * 2 = 6144 but we use compressed form
-# Actually from C: DLPL_PK_BYTES = DLPL_MATRIX_BYTES + DLPL_BC_BYTES 
-#                                = K*K*N*2 + K*N*2 = (K*K + K) * N * 2
-PK_BYTES = (K * K + K) * N * 2  # 12 * 256 * 2 = 6144... but output shows 9216
-# Let's match what the C code produces
-PK_BYTES = 9216   # From actual output
-SK_BYTES = 3072   # From actual output (PKE sk = s only = K * N * 2)
-CT_BYTES = 4640   # From actual output
+# Security level configurations
+LEVELS = {
+    'L1': {'k': 2, 'name': 'DLPL-256'},
+    'L3': {'k': 3, 'name': 'DLPL-384'},
+    'L5': {'k': 4, 'name': 'DLPL-1024'},
+}
 
-KEM_PK_BYTES = 9216
-KEM_SK_BYTES = 12352  # SK + PK + hash + z
-KEM_CT_BYTES = 4640
-KEM_SS_BYTES = 32
+def get_sizes(k):
+    """Calculate key/ciphertext sizes for given k parameter"""
+    # PKE sizes
+    pk_bytes = 2 * k * k * POLY_BYTES      # A and t matrices: 2 * k² * poly_bytes
+    sk_pke_bytes = 2 * k * POLY_BYTES      # s and e vectors: 2 * k * poly_bytes
+    ct_bytes = k * k * POLY_BYTES + 32     # u matrix + v hash: k² * poly_bytes + 32
+    
+    # KEM sizes (includes pk, z, and h(pk) in secret key)
+    sk_kem_bytes = sk_pke_bytes + pk_bytes + 64  # sk_pke + pk + z(32) + h_pk(32)
+    ss_bytes = 32
+    
+    return {
+        'pk': pk_bytes,
+        'sk_pke': sk_pke_bytes,
+        'sk_kem': sk_kem_bytes,
+        'ct': ct_bytes,
+        'ss': ss_bytes,
+    }
+
+# Default to L1 for backwards compatibility
+K = 2
+sizes = get_sizes(K)
+PK_BYTES = sizes['pk']
+SK_BYTES = sizes['sk_pke']
+CT_BYTES = sizes['ct']
+KEM_PK_BYTES = sizes['pk']
+KEM_SK_BYTES = sizes['sk_kem']
+KEM_CT_BYTES = sizes['ct']
+KEM_SS_BYTES = sizes['ss']
 
 
 def parse_kem_kat(filename):
@@ -69,12 +94,22 @@ def parse_pke_kat(filename):
     return parse_kem_kat(filename)  # Same format
 
 
+def detect_security_level(pk_len):
+    """Detect security level from public key size"""
+    for level, config in LEVELS.items():
+        sizes = get_sizes(config['k'])
+        if sizes['pk'] == pk_len:
+            return level, config['k']
+    return None, None
+
+
 def verify_kem_vectors(vectors):
     """Verify KEM test vectors"""
     print(f"\nVerifying {len(vectors)} KEM test vectors...")
     
     passed = 0
     failed = 0
+    detected_level = None
     
     for v in vectors:
         count = v.get('count', '?')
@@ -99,22 +134,46 @@ def verify_kem_vectors(vectors):
         ss_enc_len = len(ss_enc_hex) // 2
         ss_dec_len = len(ss_dec_hex) // 2
         
+        # Detect security level from pk size
+        if detected_level is None:
+            level, k = detect_security_level(pk_len)
+            if level:
+                detected_level = level
+                sizes = get_sizes(k)
+                print(f"  Detected security level: {level} (k={k})")
+                print(f"  Expected sizes: PK={sizes['pk']}, SK(KEM)={sizes['sk_kem']}, CT={sizes['ct']}")
+        
+        # Get expected sizes for detected level
+        if detected_level:
+            k = LEVELS[detected_level]['k']
+            sizes = get_sizes(k)
+            exp_pk = sizes['pk']
+            exp_sk = sizes['sk_kem']
+            exp_ct = sizes['ct']
+            exp_ss = sizes['ss']
+        else:
+            # Fallback to defaults
+            exp_pk = KEM_PK_BYTES
+            exp_sk = KEM_SK_BYTES
+            exp_ct = KEM_CT_BYTES
+            exp_ss = KEM_SS_BYTES
+        
         # Verify sizes match expected
         size_ok = True
-        if pk_len != KEM_PK_BYTES:
-            print(f"  Vector {count}: pk size {pk_len} != expected {KEM_PK_BYTES}")
+        if pk_len != exp_pk:
+            print(f"  Vector {count}: pk size {pk_len} != expected {exp_pk}")
             size_ok = False
-        if sk_len != KEM_SK_BYTES:
-            print(f"  Vector {count}: sk size {sk_len} != expected {KEM_SK_BYTES}")
+        if sk_len != exp_sk:
+            print(f"  Vector {count}: sk size {sk_len} != expected {exp_sk}")
             size_ok = False
-        if ct_len != KEM_CT_BYTES:
-            print(f"  Vector {count}: ct size {ct_len} != expected {KEM_CT_BYTES}")
+        if ct_len != exp_ct:
+            print(f"  Vector {count}: ct size {ct_len} != expected {exp_ct}")
             size_ok = False
-        if ss_enc_len != KEM_SS_BYTES:
-            print(f"  Vector {count}: ss_enc size {ss_enc_len} != expected {KEM_SS_BYTES}")
+        if ss_enc_len != exp_ss:
+            print(f"  Vector {count}: ss_enc size {ss_enc_len} != expected {exp_ss}")
             size_ok = False
-        if ss_dec_len != KEM_SS_BYTES:
-            print(f"  Vector {count}: ss_dec size {ss_dec_len} != expected {KEM_SS_BYTES}")
+        if ss_dec_len != exp_ss:
+            print(f"  Vector {count}: ss_dec size {ss_dec_len} != expected {exp_ss}")
             size_ok = False
         
         # Verify shared secrets match
@@ -141,6 +200,7 @@ def verify_pke_vectors(vectors):
     
     passed = 0
     failed = 0
+    detected_level = None
     
     for v in vectors:
         count = v.get('count', '?')
@@ -163,15 +223,37 @@ def verify_pke_vectors(vectors):
         sk_len = len(v['sk']) // 2
         ct_len = len(v['ct']) // 2
         
+        # Detect security level from pk size
+        if detected_level is None:
+            level, k = detect_security_level(pk_len)
+            if level:
+                detected_level = level
+                sizes = get_sizes(k)
+                print(f"  Detected security level: {level} (k={k})")
+                print(f"  Expected sizes: PK={sizes['pk']}, SK(PKE)={sizes['sk_pke']}, CT={sizes['ct']}")
+        
+        # Get expected sizes for detected level
+        if detected_level:
+            k = LEVELS[detected_level]['k']
+            sizes = get_sizes(k)
+            exp_pk = sizes['pk']
+            exp_sk = sizes['sk_pke']
+            exp_ct = sizes['ct']
+        else:
+            # Fallback to defaults
+            exp_pk = PK_BYTES
+            exp_sk = SK_BYTES
+            exp_ct = CT_BYTES
+        
         size_ok = True
-        if pk_len != PK_BYTES:
-            print(f"  Vector {count}: pk size {pk_len} != expected {PK_BYTES}")
+        if pk_len != exp_pk:
+            print(f"  Vector {count}: pk size {pk_len} != expected {exp_pk}")
             size_ok = False
-        if sk_len != SK_BYTES:
-            print(f"  Vector {count}: sk size {sk_len} != expected {SK_BYTES}")
+        if sk_len != exp_sk:
+            print(f"  Vector {count}: sk size {sk_len} != expected {exp_sk}")
             size_ok = False
-        if ct_len != CT_BYTES:
-            print(f"  Vector {count}: ct size {ct_len} != expected {CT_BYTES}")
+        if ct_len != exp_ct:
+            print(f"  Vector {count}: ct size {ct_len} != expected {exp_ct}")
             size_ok = False
         
         if msg_match and verify_field == 'PASS' and size_ok:
@@ -238,6 +320,17 @@ def main():
     print("=" * 60)
     print("DLPL-DH KAT Verification")
     print("=" * 60)
+    
+    # Print expected sizes for all levels
+    print("\nExpected sizes (Kyber-style 13-bit encoding):")
+    print(f"  poly_bytes = {POLY_BYTES} bytes (n={N}, LOGQ={LOGQ})")
+    print()
+    for level, config in LEVELS.items():
+        k = config['k']
+        sizes = get_sizes(k)
+        print(f"  {level} (k={k}): PK={sizes['pk']}B, SK_PKE={sizes['sk_pke']}B, "
+              f"SK_KEM={sizes['sk_kem']}B, CT={sizes['ct']}B")
+    print()
     
     all_passed = True
     
